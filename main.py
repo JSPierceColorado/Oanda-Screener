@@ -141,7 +141,8 @@ def add_sparkline_formulas(
         )
         values.append([formula])
 
-    ws.update(range_name=range_str, values=values)
+    # IMPORTANT: make Sheets treat them as formulas, not plain text
+    ws.update(range_name=range_str, values=values, value_input_option="USER_ENTERED")
     logger.info(
         "Wrote SPARKLINE formulas to %s!%s for %d rows",
         screener_tab,
