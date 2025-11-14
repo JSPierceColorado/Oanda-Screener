@@ -113,7 +113,6 @@ def add_sparkline_formulas(
       - 'pair' is column A
       - 'sparkline' is column P (16th column)
       - chartdata tab has: A=pair, B=p1, ..., AE=p30
-        (we compute last col from SPARKLINE_POINTS)
     """
     if num_rows <= 0:
         return
@@ -260,7 +259,7 @@ def compute_atr(highs: List[float], lows: List[float], closes: List[float], peri
             (h - prev_close).abs(),
             (l - prev_close).abs(),
         ],
-        axis=1,
+        axis=1
     ).max(axis=1)
 
     atr = tr.rolling(window=period, min_periods=period).mean()
@@ -313,8 +312,7 @@ def build_instrument_row(
             ret_14d = (daily_series.iloc[-1] / daily_series.iloc[-15] - 1.0) * 100.0
 
     # ---- 24h volume & range ----
-    # 96 * 15m candles = 24h
-    lookback_24h = 96
+    lookback_24h = 96  # 96 * 15m candles = 24h
     vol_24h = None
     range_24h_pct = None
 
@@ -399,12 +397,12 @@ def run_screener_once():
                 else:
                     pts = pts[-SPARKLINE_POINTS:]
 
-                # Format as strings for Sheets (or blank if None)
-                pts_str = [
-                    f"{p:.5f}" if isinstance(p, (int, float)) else ""
+                # Keep actual numbers (or blank) so Sheets sees them as numeric
+                pts_clean = [
+                    float(p) if isinstance(p, (int, float)) else ""
                     for p in pts
                 ]
-                chart_rows.append([row["pair"]] + pts_str)
+                chart_rows.append([row["pair"]] + pts_clean)
         except Exception as exc:
             logger.exception("Failed to build row for %s: %s", name, exc)
 
