@@ -51,11 +51,13 @@ def write_dataframe_to_sheet(df: pd.DataFrame, sheet_name: str, tab_name: str) -
     try:
         ws = sh.worksheet(tab_name)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=tab_name, rows=str(len(df) + 10), cols=str(len(df.columns) + 10))
+        ws = sh.add_worksheet(title=tab_name,
+                              rows=str(len(df) + 10),
+                              cols=str(len(df.columns) + 10))
 
     ws.clear()
     values = [df.columns.tolist()] + df.fillna("").astype(str).values.tolist()
-    ws.update("A1", values)
+    ws.update(range_name="A1", values=values)
     logger.info("Updated sheet '%s' tab '%s' with %d rows", sheet_name, tab_name, len(df))
 
 
@@ -81,13 +83,22 @@ def write_chartdata_to_sheet(chart_rows: list, sheet_name: str, tab_name: str) -
 
     headers = ["pair"] + [f"p{i+1}" for i in range(SPARKLINE_POINTS)]
     values = [headers] + chart_rows
-    ws.update("A1", values)
+    ws.update(range_name="A1", values=values)
     logger.info(
         "Updated sheet '%s' tab '%s' with %d rows of chart data",
         sheet_name,
         tab_name,
         len(chart_rows),
     )
+
+
+def _col_letter_from_index(idx: int) -> str:
+    """1-based index -> Excel/Sheets column letter (1=A, 2=B, ...)."""
+    result = ""
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        result = chr(65 + rem) + result
+    return result
 
 
 def add_sparkline_formulas(
@@ -98,7 +109,11 @@ def add_sparkline_formulas(
 ) -> None:
     """
     Add SPARKLINE formulas to the 'sparkline' column in the screener sheet.
-    Assumes 'pair' is column A and 'sparkline' is column P.
+    Assumes:
+      - 'pair' is column A
+      - 'sparkline' is column P (16th column)
+      - chartdata tab has: A=pair, B=p1, ..., AE=p30
+        (we compute last col from SPARKLINE_POINTS)
     """
     if num_rows <= 0:
         return
@@ -107,27 +122,27 @@ def add_sparkline_formulas(
     sh = gc.open(sheet_name)
     ws = sh.worksheet(screener_tab)
 
-    # 'sparkline' is 16th column in our defined schema -> column P
-    sparkline_col_letter = "P"
+    sparkline_col_letter = "P"  # 16th column
     start_row = 2
     end_row = num_rows + 1  # inclusive
 
     range_str = f"{sparkline_col_letter}{start_row}:{sparkline_col_letter}{end_row}"
 
+    # chartdata: A=1 (pair), B=2 (p1), ..., last = 1 + SPARKLINE_POINTS
+    last_col_idx = 1 + SPARKLINE_POINTS
+    last_col_letter = _col_letter_from_index(last_col_idx)
+
     values = []
     for row_idx in range(start_row, end_row + 1):
+        # Row alignment: screener row N corresponds to chartdata row N
         formula = (
             f"=IFERROR("
-            f"SPARKLINE("
-            f"OFFSET('{chartdata_tab}'!$B$2,"
-            f" MATCH($A{row_idx},'{chartdata_tab}'!$A$2:$A$100,0)-1,"
-            f" 0,1,{SPARKLINE_POINTS}"
-            f")"
-            f"),\"\")"
+            f"SPARKLINE('{chartdata_tab}'!$B{row_idx}:${last_col_letter}{row_idx})"
+            f",\"\")"
         )
         values.append([formula])
 
-    ws.update(range_str, values)
+    ws.update(range_name=range_str, values=values)
     logger.info(
         "Wrote SPARKLINE formulas to %s!%s for %d rows",
         screener_tab,
