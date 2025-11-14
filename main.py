@@ -19,7 +19,10 @@ OANDA_API_URLS = {
     "live": "https://api-fxtrade.oanda.com/v3",
 }
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
 logger = logging.getLogger(__name__)
 
