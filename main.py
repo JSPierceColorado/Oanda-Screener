@@ -24,6 +24,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# Number of points in sparkline
+SPARKLINE_POINTS = 30
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +57,83 @@ def write_dataframe_to_sheet(df: pd.DataFrame, sheet_name: str, tab_name: str) -
     values = [df.columns.tolist()] + df.fillna("").astype(str).values.tolist()
     ws.update("A1", values)
     logger.info("Updated sheet '%s' tab '%s' with %d rows", sheet_name, tab_name, len(df))
+
+
+def write_chartdata_to_sheet(chart_rows: list, sheet_name: str, tab_name: str) -> None:
+    """
+    Write chart data for sparklines:
+    Row 1: pair, p1, p2, ..., pN
+    Row i: pair_name, last N closes...
+    """
+    gc = get_gspread_client()
+    sh = gc.open(sheet_name)
+
+    try:
+        ws = sh.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(
+            title=tab_name,
+            rows=str(len(chart_rows) + 10),
+            cols=str(SPARKLINE_POINTS + 2),
+        )
+
+    ws.clear()
+
+    headers = ["pair"] + [f"p{i+1}" for i in range(SPARKLINE_POINTS)]
+    values = [headers] + chart_rows
+    ws.update("A1", values)
+    logger.info(
+        "Updated sheet '%s' tab '%s' with %d rows of chart data",
+        sheet_name,
+        tab_name,
+        len(chart_rows),
+    )
+
+
+def add_sparkline_formulas(
+    sheet_name: str,
+    screener_tab: str,
+    chartdata_tab: str,
+    num_rows: int,
+) -> None:
+    """
+    Add SPARKLINE formulas to the 'sparkline' column in the screener sheet.
+    Assumes 'pair' is column A and 'sparkline' is column P.
+    """
+    if num_rows <= 0:
+        return
+
+    gc = get_gspread_client()
+    sh = gc.open(sheet_name)
+    ws = sh.worksheet(screener_tab)
+
+    # 'sparkline' is 16th column in our defined schema -> column P
+    sparkline_col_letter = "P"
+    start_row = 2
+    end_row = num_rows + 1  # inclusive
+
+    range_str = f"{sparkline_col_letter}{start_row}:{sparkline_col_letter}{end_row}"
+
+    values = []
+    for row_idx in range(start_row, end_row + 1):
+        formula = (
+            f"=IFERROR("
+            f"SPARKLINE("
+            f"OFFSET('{chartdata_tab}'!$B$2,"
+            f" MATCH($A{row_idx},'{chartdata_tab}'!$A$2:$A$100,0)-1,"
+            f" 0,1,{SPARKLINE_POINTS}"
+            f")"
+            f"),\"\")"
+        )
+        values.append([formula])
+
+    ws.update(range_str, values)
+    logger.info(
+        "Wrote SPARKLINE formulas to %s!%s for %d rows",
+        screener_tab,
+        range_str,
+        num_rows,
+    )
 
 
 # ------------------------
@@ -250,10 +330,9 @@ def build_instrument_row(
 
     atr14_15m = compute_atr(m15_highs, m15_lows, m15_closes, period=14)
 
-    # ---- Sparkline: last 30 closes as comma-separated string ----
-    spark_n = 30
-    spark_slice = m15_closes[-spark_n:]
-    sparkline = ",".join(f"{p:.5f}" for p in spark_slice)
+    # ---- Sparkline points: last SPARKLINE_POINTS closes ----
+    spark_slice = m15_closes[-SPARKLINE_POINTS:]
+    sparkline_points = spark_slice
 
     row = {
         "pair": instrument_name,
@@ -271,7 +350,8 @@ def build_instrument_row(
         "MACD_signal": macd_signal,
         "MACD_hist": macd_hist,
         "ATR14_15m": atr14_15m,
-        "sparkline": sparkline,
+        "sparkline": None,            # filled by formula later
+        "sparkline_points": sparkline_points,
         "updated_at": pd.Timestamp.utcnow().isoformat(),
     }
 
@@ -285,6 +365,8 @@ def run_screener_once():
     instruments = fetch_instruments(session, base_url, account_id)
 
     rows: List[Dict[str, Any]] = []
+    chart_rows: List[list] = []
+
     for ins in instruments:
         name = ins.get("name")
         if not name:
@@ -294,6 +376,20 @@ def run_screener_once():
             row = build_instrument_row(session, base_url, name)
             if row:
                 rows.append(row)
+
+                pts = row.get("sparkline_points", [])
+                # Normalize to exactly SPARKLINE_POINTS entries
+                if len(pts) < SPARKLINE_POINTS:
+                    pts = [None] * (SPARKLINE_POINTS - len(pts)) + pts
+                else:
+                    pts = pts[-SPARKLINE_POINTS:]
+
+                # Format as strings for Sheets (or blank if None)
+                pts_str = [
+                    f"{p:.5f}" if isinstance(p, (int, float)) else ""
+                    for p in pts
+                ]
+                chart_rows.append([row["pair"]] + pts_str)
         except Exception as exc:
             logger.exception("Failed to build row for %s: %s", name, exc)
 
@@ -301,7 +397,14 @@ def run_screener_once():
         logger.warning("No rows built this run.")
         return
 
-    df = pd.DataFrame(rows)
+    # Strip sparkline_points from main DF
+    cleaned_rows = []
+    for r in rows:
+        r_copy = r.copy()
+        r_copy.pop("sparkline_points", None)
+        cleaned_rows.append(r_copy)
+
+    df = pd.DataFrame(cleaned_rows)
 
     # Keep a stable ordering
     columns = [
@@ -326,9 +429,15 @@ def run_screener_once():
     df = df[columns]
 
     sheet_name = os.getenv("GOOGLE_SHEET_NAME", "Active-Investing")
-    tab_name = os.getenv("OANDA_SCREENER_TAB", "Oanda-Screener")
+    screener_tab = os.getenv("OANDA_SCREENER_TAB", "Oanda-Screener")
+    chartdata_tab = os.getenv("OANDA_CHARTDATA_TAB", "Oanda-Screener-Chartdata")
 
-    write_dataframe_to_sheet(df, sheet_name, tab_name)
+    # Write main screener
+    write_dataframe_to_sheet(df, sheet_name, screener_tab)
+    # Write chart data for sparklines
+    write_chartdata_to_sheet(chart_rows, sheet_name, chartdata_tab)
+    # Add sparkline formulas referencing chartdata
+    add_sparkline_formulas(sheet_name, screener_tab, chartdata_tab, num_rows=len(df))
 
 
 # ------------------------
