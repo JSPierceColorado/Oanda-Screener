@@ -44,21 +44,47 @@ def get_gspread_client() -> gspread.Client:
 
 
 def write_dataframe_to_sheet(df: pd.DataFrame, sheet_name: str, tab_name: str) -> None:
-    """Create/replace the Oanda-Screener tab with the provided DataFrame."""
+    """
+    Create/replace the Oanda-Screener tab data in columns A:Q ONLY.
+    Columns R onward are left untouched so user formulas & notes persist.
+    """
     gc = get_gspread_client()
     sh = gc.open(sheet_name)
 
     try:
         ws = sh.worksheet(tab_name)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=tab_name,
-                              rows=str(len(df) + 10),
-                              cols=str(len(df.columns) + 10))
+        ws = sh.add_worksheet(
+            title=tab_name,
+            rows=str(len(df) + 100),
+            cols="30",  # give some room for user columns (R+)
+        )
 
-    ws.clear()
-    values = [df.columns.tolist()] + df.fillna("").astype(str).values.tolist()
-    ws.update(range_name="A1", values=values)
-    logger.info("Updated sheet '%s' tab '%s' with %d rows", sheet_name, tab_name, len(df))
+    # Build values for our data columns
+    header = df.columns.tolist()
+    data_rows = df.fillna("").astype(str).values.tolist()
+    values = [header] + data_rows
+
+    num_data_rows = len(values)
+    num_data_cols = len(header)  # should be 17 (A:Q)
+
+    # Make sure we cover all existing rows in A:Q so old data gets cleared
+    max_rows = max(ws.row_count, num_data_rows)
+    blank_grid = [[""] * num_data_cols for _ in range(max_rows)]
+
+    # Overlay our header + data at the top of the blank grid
+    for r, row in enumerate(values):
+        for c, val in enumerate(row):
+            blank_grid[r][c] = val
+
+    # Update starting at A1, only for our data columns
+    ws.update(range_name="A1", values=blank_grid)
+    logger.info(
+        "Updated sheet '%s' tab '%s' A:Q with %d data rows",
+        sheet_name,
+        tab_name,
+        len(df),
+    )
 
 
 def write_chartdata_to_sheet(chart_rows: list, sheet_name: str, tab_name: str) -> None:
@@ -66,6 +92,7 @@ def write_chartdata_to_sheet(chart_rows: list, sheet_name: str, tab_name: str) -
     Write chart data for sparklines:
     Row 1: pair, p1, p2, ..., pN
     Row i: pair_name, last N closes...
+    This tab is entirely managed by the bot, so we can clear it.
     """
     gc = get_gspread_client()
     sh = gc.open(sheet_name)
@@ -141,8 +168,12 @@ def add_sparkline_formulas(
         )
         values.append([formula])
 
-    # IMPORTANT: make Sheets treat them as formulas, not plain text
-    ws.update(range_name=range_str, values=values, value_input_option="USER_ENTERED")
+    # Make Sheets treat them as formulas, not plain text
+    ws.update(
+        range_name=range_str,
+        values=values,
+        value_input_option="USER_ENTERED",
+    )
     logger.info(
         "Wrote SPARKLINE formulas to %s!%s for %d rows",
         screener_tab,
@@ -446,7 +477,7 @@ def run_screener_once():
     screener_tab = os.getenv("OANDA_SCREENER_TAB", "Oanda-Screener")
     chartdata_tab = os.getenv("OANDA_CHARTDATA_TAB", "Oanda-Screener-Chartdata")
 
-    # Write main screener
+    # Write main screener (A:Q only)
     write_dataframe_to_sheet(df, sheet_name, screener_tab)
     # Write chart data for sparklines
     write_chartdata_to_sheet(chart_rows, sheet_name, chartdata_tab)
